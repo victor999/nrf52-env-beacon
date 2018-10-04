@@ -3,6 +3,7 @@
 
 #include "hal_twi.h"
 
+#define MCP9808_I2CADDR        (0x18U)
 
 /**@brief The mcp9808 status codes.
  */
@@ -93,6 +94,10 @@ uint32_t drv_mcp9808_config_reg_set(uint16_t reg_value);
  * @return DRV_MCP9808_STATUS_CODE_DISALLOWED   If the call was not allowed at this time.
  */
 uint32_t drv_mcp9808_temperature_get(int32_t * p_temperature_milli_deg);
+
+uint32_t set_normal_mode(void);
+
+uint32_t set_shutdown_mode(void);
 
 /**@brief Opens access to the mcp9808 driver.
  *

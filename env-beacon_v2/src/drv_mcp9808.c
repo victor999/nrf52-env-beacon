@@ -3,8 +3,6 @@
 
 /* Register addresses of the mcp9808 device. */
 
-#define MCP9808_I2CADDR        (0x18U)
-
 #define MCP9808_REG_CONFIG					(0x01U)
 
 #define MCP9808_REG_UPPER_TEMP			(0x02U)
@@ -14,7 +12,8 @@
 #define MCP9808_REG_MANUF_ID				(0x06U)
 #define MCP9808_REG_DEVICE_ID				(0x07U)
 
-#define MCP9808_REG_CONFIG_SHUTDOWN    (0x0100U)
+#define MCP9808_REG_CONFIG_SHUTDOWN    	(0x0100U)
+#define MCP9808_REG_CONFIG_NORMAL    		(0x0U)
 
 /* Driver properties. */
 static struct
@@ -104,53 +103,6 @@ static bool reg_get_16(uint8_t reg_addr, uint16_t *p_value)
     return ( false );
 }
 
-
-/* Gets the value of the registers from left to right and stores them at the specified location. */
-static bool two_registers_get(uint8_t reg_a, uint8_t reg_b, uint16_t *value)
-{
-    uint8_t  tmp_u8;
-    uint16_t tmp_u16;
-    
-    if ( (m_drv_mcp9808.p_drv_mcp9808_cfg != NULL)
-    &&   (reg_get(reg_b, &tmp_u8)) )
-    {
-        tmp_u16 = tmp_u8;
-        if ( reg_get(reg_a, &tmp_u8) )
-        {
-            *value = (tmp_u16 << 8) | tmp_u8;
-             return ( true );
-        }
-    }
-    
-    return ( false );
-}
-
-
-/* Gets the value of the registers from left to right and stores them at the specified location. */
-static bool three_registers_get(uint8_t reg_a, uint8_t reg_b, uint8_t reg_c, uint32_t *value)
-{
-    uint8_t  tmp_u8;
-    uint32_t tmp_u32;
-    
-    if ( (m_drv_mcp9808.p_drv_mcp9808_cfg != NULL)
-    &&   (reg_get(reg_c, &tmp_u8)) )
-    {
-        tmp_u32 = tmp_u8;
-        if ( reg_get(reg_b, &tmp_u8) )
-        {
-            tmp_u32 <<= 8;
-            if ( reg_get(reg_a, &tmp_u8) )
-            {
-                *value = (tmp_u32 << 8) | tmp_u8;
-                return ( true );
-            }
-        }
-    }
-    
-    return ( false );
-}
-
-
 /* Sets the specified register to the specified value. */
 static bool reg_set(uint8_t reg_addr, uint8_t value)
 {
@@ -204,25 +156,6 @@ static bool reg_set_16(uint8_t reg_addr, uint16_t value)
     
     return ( false );
 }
-
-
-/* Modifies the specified register according to the specified set and clear masks. */
-static bool register_bits_modify(uint8_t reg, uint8_t set_mask, uint8_t clear_mask)
-{
-    uint8_t  tmp_u8;
-    
-    if ( ((set_mask & clear_mask)       == 0)
-    &&   (m_drv_mcp9808.p_drv_mcp9808_cfg != NULL)
-    &&   (reg_get(reg, &tmp_u8)) )
-    {
-        tmp_u8 |= set_mask;
-        tmp_u8 &= ~(clear_mask);
-        return ( reg_set(reg, tmp_u8) );
-    }
-    
-    return ( false );
-}
-
 
 /* Handles the signals from the TWI driver. */
 static void hal_twi_sig_callback(hal_twi_signal_type_t hal_twi_signal_type)
@@ -328,4 +261,14 @@ uint32_t drv_mcp9808_close(void)
     }
     
     return ( DRV_MCP9808_STATUS_CODE_DISALLOWED );
+}
+
+uint32_t set_normal_mode(void)
+{
+	return drv_mcp9808_config_reg_set(MCP9808_REG_CONFIG_NORMAL);
+}
+
+uint32_t set_shutdown_mode(void)
+{
+	return drv_mcp9808_config_reg_set(MCP9808_REG_CONFIG_SHUTDOWN);
 }

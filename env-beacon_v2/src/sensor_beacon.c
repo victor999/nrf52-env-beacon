@@ -35,6 +35,7 @@
 #include "hal_timer.h"
 #include "hal_clock.h"
 #include "drv_bme280.h"
+#include "drv_mcp9808.h"
 #include "hal_serial.h"
 #include "hal_twi.h"
 
@@ -158,6 +159,7 @@ static const hal_serial_cfg_t serial_cfg =
 #define SENSOR_SKIP_READ_COUNT                      (5)                /* The number of advertising events between reading the sensor. */
 
 #define POWERUP_DELAY_US														(400000)							/*delay after powerup the sensor*/
+#define SAADC_DELAY_US															(500000)
 
 
 #if INITIAL_TIMEOUT - HFCLK_STARTUP_TIME_US < 400
@@ -214,6 +216,25 @@ static bool volatile m_rtc_isr_called;      /* Indicates that the RTC ISR has ex
 static uint32_t m_time_us;                  /* Keeps track of the latest scheduled point in time. */
 static uint32_t m_skip_read_counter = 0;    /* Keeps track on when to read the sensor. */
 static uint8_t m_adv_pdu[40];               /* The RAM representation of the advertising PDU. */
+
+
+static void cpu_sleep_hook(void);
+
+static const drv_bme280_cfg_t m_drv_bme280_cfg =
+{
+		.twi_id = HAL_TWI_ID_TWI0,
+		.twi_cfg.address   = (BME280_ADDRESS << TWI_ADDRESS_ADDRESS_Pos),
+		.twi_cfg.frequency = (TWI_FREQUENCY_FREQUENCY_K400 << TWI_FREQUENCY_FREQUENCY_Pos),
+		.p_sleep_hook = cpu_sleep_hook,
+};
+
+static const drv_mcp9808_cfg_t m_drv_mcp9808_cfg =
+{
+		.twi_id = HAL_TWI_ID_TWI0,
+		.twi_cfg.address   = (MCP9808_I2CADDR << TWI_ADDRESS_ADDRESS_Pos),
+		.twi_cfg.frequency = (TWI_FREQUENCY_FREQUENCY_K400 << TWI_FREQUENCY_FREQUENCY_Pos),
+		.p_sleep_hook = cpu_sleep_hook,
+};
 
 
 /* Initializes the beacon advertising PDU.
@@ -332,19 +353,8 @@ void wait_for_timer(void)
 		}
 }
 
-
-/* Powers up the the mcp9808 device and TWI pull-up resistors.
- */
-static void sensor_chip_powerup(void)
-{
-    static const drv_bme280_cfg_t m_drv_bme280_cfg =
-    {
-        .twi_id = HAL_TWI_ID_TWI0,
-        .twi_cfg.address   = (0x77 << TWI_ADDRESS_ADDRESS_Pos),
-        .twi_cfg.frequency = (TWI_FREQUENCY_FREQUENCY_K400 << TWI_FREQUENCY_FREQUENCY_Pos),
-        .p_sleep_hook = cpu_sleep_hook,
-    };
-    
+void sensors_init(void)
+{    
     if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
     {
         drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
@@ -352,6 +362,21 @@ static void sensor_chip_powerup(void)
         sensor_init();
 			
 				sensor_reset();
+			
+				(void)drv_bme280_close();
+			
+				if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+				{
+						drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
+					
+						set_shutdown_mode();
+					
+						(void)drv_mcp9808_close();
+				}
+				else
+				{
+						(void)drv_mcp9808_close();
+				}
     
 				m_time_us += POWERUP_DELAY_US;
 			
@@ -359,21 +384,25 @@ static void sensor_chip_powerup(void)
 				hal_timer_timeout_set(m_time_us);
 				wait_for_timer();
 			
-				read_coefficients(); // read trimming parameters, see DS 4.2.2
+				if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
+				{
+						drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
+    
+						read_coefficients(); // read trimming parameters, see DS 4.2.2
 
-				sensor_set_sampling(MODE_NORMAL,
-					SAMPLING_X1,
-					SAMPLING_X1,
-					SAMPLING_X1,
-					FILTER_OFF,
-					STANDBY_MS_1000); // use defaults
-	
-				m_time_us += 100000;
-
-				m_rtc_isr_called = false;
-				hal_timer_timeout_set(m_time_us);
-				wait_for_timer();
-        hal_clock_hfclk_disable();
+						sensor_set_sampling(MODE_NORMAL,
+							SAMPLING_X1,
+							SAMPLING_X1,
+							SAMPLING_X1,
+							FILTER_OFF,
+							STANDBY_MS_1000); // use defaults
+					
+						(void)drv_bme280_close();
+				}
+				else
+				{
+						(void)drv_bme280_close();
+				}
     }
     else
     {
@@ -381,12 +410,41 @@ static void sensor_chip_powerup(void)
     }
 }
 
+/* Powers up the the mcp9808 device and TWI pull-up resistors.
+ */
+static void sensor_chip_powerup(void)
+{		
+		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+		{
+				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
+			
+				set_normal_mode();
+			
+				(void)drv_mcp9808_close();
+		}
+		else
+		{
+				(void)drv_mcp9808_close();
+		}
+}
+
 
 /* Ends after measuring temperature and pressure.
  */
 static void sensor_chip_measurement_done(void)
 {
-    (void)drv_bme280_close();
+		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+		{
+				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
+			
+				set_shutdown_mode();
+			
+				(void)drv_mcp9808_close();
+		}
+		else
+		{
+				(void)drv_mcp9808_close();
+		}
 }
 
 
@@ -419,21 +477,47 @@ void get_battery_level(uint8_t* bat_level)
 
 /* Handles sensor managing.
  */
-static void sensor_handler(uint32_t start_time_us)
+static void sensor_handler(void)
 {
     int32_t temperature = 0;	
 		uint32_t pressure = 1000;
 		uint16_t humidity = 80;
 		uint8_t battery_level = 28;
+
+		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+		{
+				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
+				int32_t temp2 = 0;
+				drv_mcp9808_temperature_get(&temp2);
+			
+				temperature = temp2;
+			
+				(void)drv_mcp9808_close();
+		}
+		else
+		{
+				(void)drv_mcp9808_close();
+		}
 		
-		float real_temp = sensor_read_temperature();
-		temperature = real_temp * 1000;
-	
-		float real_hum = sensor_read_humidity();
-		humidity = real_hum;
-	
-		float real_press = sensor_read_pressure();
-		pressure = real_press;
+		if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
+		{
+				drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
+		
+				float real_temp = sensor_read_temperature();
+//				temperature = real_temp * 1000;
+			
+				float real_hum = sensor_read_humidity();
+				humidity = real_hum;
+			
+				float real_press = sensor_read_pressure();
+				pressure = real_press;
+			
+				(void)drv_bme280_close();
+		}
+		else
+		{
+				(void)drv_bme280_close();
+		}
 		
 
 		get_battery_level(&battery_level);
@@ -504,7 +588,7 @@ void saadc_init(void)
     //Configure SAADC channel
     channel_config.reference = NRF_SAADC_REFERENCE_INTERNAL;                              //Set internal reference of fixed 0.6 volts
     channel_config.gain = NRF_SAADC_GAIN1_6;                                              //Set input gain to 1/6. The maximum SAADC input voltage is then 0.6V/(1/6)=3.6V. The single ended input range is then 0V-3.6V
-    channel_config.acq_time = NRF_SAADC_ACQTIME_10US;                                     //Set acquisition time. Set low acquisition time to enable maximum sampling frequency of 200kHz. Set high acquisition time to allow maximum source resistance up to 800 kohm, see the SAADC electrical specification in the PS. 
+    channel_config.acq_time = NRF_SAADC_ACQTIME_40US;                                     //Set acquisition time. Set low acquisition time to enable maximum sampling frequency of 200kHz. Set high acquisition time to allow maximum source resistance up to 800 kohm, see the SAADC electrical specification in the PS. 
     channel_config.mode = NRF_SAADC_MODE_SINGLE_ENDED;                                    //Set SAADC as single ended. This means it will only have the positive pin as input, and the negative pin is shorted to ground (0V) internally.
     channel_config.pin_p = NRF_SAADC_INPUT_AIN0;                                          //Select the input pin for the channel. AIN0 pin maps to physical pin P0.02.
     channel_config.pin_n = NRF_SAADC_INPUT_DISABLED;                                      //Since the SAADC is single ended, the negative pin is disabled. The negative pin is shorted to ground internally.
@@ -533,20 +617,36 @@ static void beacon_handler(void)
 {
     hal_radio_reset();
     hal_timer_start();
-		sensor_chip_powerup();
+		sensors_init();
     
     m_time_us = INITIAL_TIMEOUT - HFCLK_STARTUP_TIME_US; 
 	
-		m_time_us += 40000;	
+		m_time_us += POWERUP_DELAY_US;	
 
     do
     {
         if ( m_skip_read_counter == 0 )
-        {											
-            sensor_handler(m_time_us);
+        {		
+						sensor_chip_powerup();
+					
+						m_time_us += POWERUP_DELAY_US;
+					
+						m_rtc_isr_called = false;
+            hal_timer_timeout_set(m_time_us);
+            wait_for_timer();
+					
+            sensor_handler();
+						
+						sensor_chip_measurement_done();
+					
+						m_time_us += SAADC_DELAY_US;
+					
+						m_rtc_isr_called = false;
+            hal_timer_timeout_set(m_time_us);
+            wait_for_timer();
+					
 						nrf_drv_saadc_sample();                                        //Trigger the SAADC SAMPLE task
 						calibration_handler();
-//						sensor_chip_measurement_done();
         }
         m_skip_read_counter = ( (m_skip_read_counter + 1) < SENSOR_SKIP_READ_COUNT ) ? (m_skip_read_counter + 1) : 0;
 				
@@ -569,7 +669,7 @@ static void beacon_handler(void)
         
         DBG_HFCLK_DISABLED;
         
-        m_time_us = m_time_us + (INTERVAL_US - HFCLK_STARTUP_TIME_US); 
+        m_time_us = m_time_us + (INTERVAL_US - HFCLK_STARTUP_TIME_US) - (POWERUP_DELAY_US + SAADC_DELAY_US); 
     } while ( 1 );
 }  
 
@@ -597,6 +697,7 @@ int main(void)
     hal_twi_init();
     
     drv_bme280_init();
+		drv_mcp9808_init();
 	
 		saadc_init();                                    //Initialize and start SAADC
 		
