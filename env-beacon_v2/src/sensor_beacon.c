@@ -510,7 +510,8 @@ static void sensor_handler(void)
 				humidity = real_hum;
 			
 				float real_press = sensor_read_pressure();
-				pressure = real_press;
+				if(real_press > 800)
+					pressure = real_press;
 			
 				(void)drv_bme280_close();
 		}
