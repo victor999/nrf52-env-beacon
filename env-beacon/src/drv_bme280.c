@@ -558,7 +558,7 @@ float sensor_read_humidity(void) {
     v_x1_u32r = (v_x1_u32r < 0) ? 0 : v_x1_u32r;
     v_x1_u32r = (v_x1_u32r > 419430400) ? 419430400 : v_x1_u32r;
     float h = (v_x1_u32r>>12);
-    return  h / 1024.0;
+    return  h / 1024.0f;
 }
 
 
@@ -602,7 +602,7 @@ float sensor_sea_level_for_altitude(float altitude, float atmospheric)
     // at high altitude. See this thread for more information:
     //  http://forums.adafruit.com/viewtopic.php?f=22&t=58064
 
-    return atmospheric / pow(1.0 - (altitude/44330.0), 5.255);
+    return atmospheric / pow(1.0f - (altitude/44330.0f), 5.255f);
 }
 
 uint32_t drv_bme280_close(void)

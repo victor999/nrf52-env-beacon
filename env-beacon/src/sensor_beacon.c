@@ -46,12 +46,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-#include "nrf_drv_saadc.h"
-
-#include "nrf_error.h"
-
-#define APP_IRQ_PRIORITY_LOW 6
-
 
 /* #define DBG_RADIO_ACTIVE_ENABLE      */
 
@@ -128,27 +122,20 @@
 #define DBG_WFE_END
 #endif
 
-
-#ifdef PCA20014
 static const hal_serial_cfg_t serial_cfg =
 {
     .twi0.psel.scl = 27,
     .twi0.psel.sda = 26,
-};    
-#else
-#ifdef PCA10036
-static const hal_serial_cfg_t serial_cfg =
-{
-    .twi0.psel.scl = 25,
-    .twi0.psel.sda = 23,
 };
-#else
-static const hal_serial_cfg_t serial_cfg =
-{
-    .twi0.psel.scl = 29,
-    .twi0.psel.sda = 25,    
-};
-#endif  
+
+
+#ifdef TEMPERATURE_AND_PRESSURE_BEACON
+#define M_BEACON_PDU_TYPE M_BEACON_PDU_TYPE_TEMP_PRES
+#endif
+
+
+#ifdef TEMPERATURE_ONLY_BEACON
+#define M_BEACON_PDU_TYPE M_BEACON_PDU_TYPE_TEMP_ONLY
 #endif
 
 
@@ -156,11 +143,8 @@ static const hal_serial_cfg_t serial_cfg =
 #define INTERVAL_US                                 (8000000)           /* The time in microseconds between advertising events. */
 #define INITIAL_TIMEOUT                             (INTERVAL_US)       /* The time in microseconds until adverising the first time. */
 #define START_OF_INTERVAL_TO_SENSOR_READ_TIME_US    (INTERVAL_US / 2)   /* The time from the start of the latest advertising event until reading the sensor. */
-#define SENSOR_SKIP_READ_COUNT                      (5)                /* The number of advertising events between reading the sensor. */
-
-#define POWERUP_DELAY_US														(400000)							/*delay after powerup the sensor*/
-#define SAADC_DELAY_US															(500000)
-
+#define SENSOR_SKIP_READ_COUNT                      (10)                /* The number of advertising events between reading the sensor. */
+#define POWERUP_DELAY_US														(400000)
 
 #if INITIAL_TIMEOUT - HFCLK_STARTUP_TIME_US < 400
 #error "Initial timeout too short!"
@@ -174,32 +158,13 @@ static const hal_serial_cfg_t serial_cfg =
 #define SINT16_TEMPERATURE_OFFS     (20)    /* The offset of the temperature in the beacon advertising pdu */
 #define UINT32_PRESSURE_OFFS        (26)    /* The offset of the pressure in the beacon advertising pdu */
 #define UINT32_HUMIDITY_OFFS        (34)    /* The offset of the humidity in the beacon advertising pdu */
-#define UINT8_BATT_OFFS        			(35)    /* The offset of the battery in the beacon advertising pdu */
 /* End - Definitions for beacons with both temperature and pressure. */
 
 /* Begin - Definitions for beacons with only temperature. */
 #define FLOAT32_TEMPERATURE_OFFS    (36)    /* The offset of the temperature in the beacon advertising pdu */
 /* End - Definitions for beacons with only temperature. */
 
-#define SAADC_CALIBRATION_INTERVAL 5              //Determines how often the SAADC should be calibrated relative to NRF_DRV_SAADC_EVT_DONE event. E.g. value 5 will make the SAADC calibrate every fifth time the NRF_DRV_SAADC_EVT_DONE is received.
-#define SAADC_SAMPLES_IN_BUFFER 1                 //Number of SAADC samples in RAM before returning a SAADC event. For low power SAADC set this constant to 1. Otherwise the EasyDMA will be enabled for an extended time which consumes high current.
-#define SAADC_OVERSAMPLE NRF_SAADC_OVERSAMPLE_4X  //Oversampling setting for the SAADC. Setting oversample to 4x This will make the SAADC output a single averaged value when the SAMPLE task is triggered 4 times. Enable BURST mode to make the SAADC sample 4 times when triggering SAMPLE task once.
-#define SAADC_BURST_MODE 1                        //Set to 1 to enable BURST mode, otherwise set to 0.
-
-#define ADC_REF_VOLTAGE_IN_MILLIVOLTS     600
-#define ADC_RES_12BIT                     4096   
-#define ADC_PRE_SCALING_COMPENSATION      6   
-
-#define ADC_RESULT_IN_MILLI_VOLTS(ADC_VALUE)\
-        ((((ADC_VALUE) * ADC_REF_VOLTAGE_IN_MILLIVOLTS) / ADC_RES_12BIT) * ADC_PRE_SCALING_COMPENSATION)
-
-void saadc_init(void);
-
-static nrf_saadc_value_t       m_buffer_pool[2][SAADC_SAMPLES_IN_BUFFER];
-static uint32_t                m_adc_evt_counter = 0;
-static bool                    m_saadc_calibrate = false; 
-
-int g_batteryVoltage_mv = 0;
+#define ERR_VAL	-200
 
 
 /* The beacon types.
@@ -207,7 +172,7 @@ int g_batteryVoltage_mv = 0;
 typedef enum
 {
     M_BEACON_PDU_TYPE_TEMP_ONLY = 0,    ///< Beacon with only temperature data.
-		M_BEACON_PDU_TYPE_TEMP_BATT					///< Beacon with both temperature and battery data.
+    M_BEACON_PDU_TYPE_TEMP_PRES,        ///< Beacon with both temperature and pressure data.
 } m_beacon_pdu_type_t;
 
 
@@ -273,37 +238,64 @@ static void m_beacon_pdu_bd_addr_default_set(uint8_t * p_beacon_pdu)
 
 /* Resets the sensor data of the sensor beacon PDU.
  */
-static void m_beacon_pdu_sensor_data_reset(uint8_t * p_beacon_pdu)
+static void m_beacon_pdu_sensor_data_reset(uint8_t * p_beacon_pdu, m_beacon_pdu_type_t beacon_pdu_type)
 {
-    static const uint8_t beacon_temp_press_hum[27] = 
-			{
-					0x02,
-					0x01, 0x04,
-					0x03,
-					0x03, 0xE5, 0xFE,
-					/* Entry for temperature characteristics. Ref:
-						 sint16, https://developer.bluetooth.org/gatt/characteristics/Pages/CharacteristicViewer.aspx?u=org.bluetooth.characteristic.temperature.xml */
-					0x05,
-					0x16, 0x6E, 0x2A, 0x00, 0x00,               
-					/* Entry for pressure characteristics. Ref:
+    switch ( beacon_pdu_type )
+    {
+        case M_BEACON_PDU_TYPE_TEMP_ONLY:
+            {
+                static const uint8_t beacon_temp_only[31] = 
+                {
+                    0x02,
+                    0x01, 0x04,
+                    0x03,
+                    0x19, 0x00, 0x03,
+                    0x07,
+                    0x09, 0x54, 0x65, 0x6D, 0x70, 0x6F, 0x20,
+                    0x07,
+                    0x03, 0x02, 0x18, 0x09, 0x18, 0x0A, 0x18,
+                    0x07,
+                    0x16, 0x09, 0x18, 0xA3, 0x70, 0x45, 0x41,
+                };
+                memcpy(&(p_beacon_pdu[3 + M_BD_ADDR_SIZE]), &(beacon_temp_only[0]), sizeof(beacon_temp_only));
+                p_beacon_pdu[1] = M_BD_ADDR_SIZE + sizeof(beacon_temp_only);
+            }
+            break;
+        case M_BEACON_PDU_TYPE_TEMP_PRES:
+            {
+                static const uint8_t beacon_temp_press_hum[27] = 
+                {
+                    0x02,
+                    0x01, 0x04,
+                    0x03,
+                    0x03, 0xE5, 0xFE,
+                    /* Entry for temperature characteristics. Ref:
+                       sint16, https://developer.bluetooth.org/gatt/characteristics/Pages/CharacteristicViewer.aspx?u=org.bluetooth.characteristic.temperature.xml */
+                    0x05,
+                    0x16, 0x6E, 0x2A, 0x00, 0x00,               
+                    /* Entry for pressure characteristics. Ref:
                        uint32, https://developer.bluetooth.org/gatt/characteristics/Pages/CharacteristicViewer.aspx?u=org.bluetooth.characteristic.pressure.xml */
-					0x07,
-					0x16, 0x6D, 0x2A, 0x00, 0x00, 0x00, 0x00 ,
-					/* Entry for humidity characteristics.*/
-					0x05,
-					0x16, 0x6F, 0x2A, 0x00, 0x00
-					
-			};
-			memcpy(&(p_beacon_pdu[3 + M_BD_ADDR_SIZE]), &(beacon_temp_press_hum[0]), sizeof(beacon_temp_press_hum));
-			p_beacon_pdu[1] = M_BD_ADDR_SIZE + sizeof(beacon_temp_press_hum);
+                    0x07,
+                    0x16, 0x6D, 0x2A, 0x00, 0x00, 0x00, 0x00,   
+										/* Entry for humidity characteristics.*/
+										0x05,
+										0x16, 0x6F, 0x2A, 0x00, 0x00
+                };
+                memcpy(&(p_beacon_pdu[3 + M_BD_ADDR_SIZE]), &(beacon_temp_press_hum[0]), sizeof(beacon_temp_press_hum));
+                p_beacon_pdu[1] = M_BD_ADDR_SIZE + sizeof(beacon_temp_press_hum);
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 
 /* Sets the sensor data of the sensor beacon PDU.
  */
-static void m_beacon_pdu_sensor_data_set(uint8_t * p_beacon_pdu, int32_t *p_temperature, uint32_t *p_pressure, uint16_t *p_humidity, uint8_t *p_battery_level)
+static void m_beacon_pdu_sensor_data_set(uint8_t * p_beacon_pdu, int32_t *p_temperature, int32_t *p_pressure, int16_t *p_humidity)
 {
-		if ( (p_pressure != NULL) && (p_temperature != NULL) && (p_humidity != NULL) )
+    if ( (p_pressure != NULL)&& (p_temperature != NULL) && (p_humidity != NULL) )
     {
         /* Pressure (Bluetooth standard) is in Pascal with one decimal, so
            multiplying the value by 10. */
@@ -314,10 +306,19 @@ static void m_beacon_pdu_sensor_data_set(uint8_t * p_beacon_pdu, int32_t *p_temp
            deviding the value by an additional 10. */
         p_beacon_pdu[SINT16_TEMPERATURE_OFFS    ] = ((*p_temperature / 10)     ) & 0xFF;
         p_beacon_pdu[SINT16_TEMPERATURE_OFFS + 1] = ((*p_temperature / 10) >> 8) & 0xFF;
-				/*Humidity. */
-        p_beacon_pdu[UINT32_HUMIDITY_OFFS    ] = ((*p_humidity)     ) & 0xFF;
-				/* Battery (Bluetooth standard) is in Percents*/
-        p_beacon_pdu[UINT8_BATT_OFFS] = ((*p_battery_level)      ) & 0xFF;
+        /* The humidity (Bluetooth standard) is in percents with two decimals, so
+           multiplying the value by an additional 100. */
+        p_beacon_pdu[UINT32_HUMIDITY_OFFS    ] = ((*p_humidity * 100)     ) & 0xFF;
+        p_beacon_pdu[UINT32_HUMIDITY_OFFS + 1] = ((*p_humidity * 100) >> 8) & 0xFF;
+    }
+    else if ( p_temperature != NULL )
+    {
+        /* The temperature is in Celsius with one decimal, so
+           deviding the value by an additional 100. */
+        p_beacon_pdu[FLOAT32_TEMPERATURE_OFFS    ] = ((*p_temperature / 100)     ) & 0xFF;
+        p_beacon_pdu[FLOAT32_TEMPERATURE_OFFS + 1] = ((*p_temperature / 100) >> 8) & 0xFF;
+        p_beacon_pdu[FLOAT32_TEMPERATURE_OFFS + 2] = 0x00;
+        p_beacon_pdu[FLOAT32_TEMPERATURE_OFFS + 3] = 0xFF;
     }
 }
 
@@ -338,7 +339,7 @@ static void __forceinline cpu_wfe(void)
 }
 
 
-/* Hook for the access mode feature of the bme280 driver.
+/* Hook for the access mode feature of the lps25h driver.
  */
 static void cpu_sleep_hook(void)
 {
@@ -377,11 +378,9 @@ void sensors_init(void)
 				{
 						(void)drv_mcp9808_close();
 				}
-    
-				m_time_us += POWERUP_DELAY_US;
 			
 				m_rtc_isr_called = false;
-				hal_timer_timeout_set(m_time_us);
+				hal_timer_timeout_set(m_time_us - START_OF_INTERVAL_TO_SENSOR_READ_TIME_US - START_OF_INTERVAL_TO_SENSOR_READ_TIME_US / 2);
 				wait_for_timer();
 			
 				if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
@@ -410,10 +409,24 @@ void sensors_init(void)
     }
 }
 
-/* Powers up the the mcp9808 device and TWI pull-up resistors.
+/* Powers up the the lps25h device and TWI pull-up resistors.
  */
 static void sensor_chip_powerup(void)
-{		
+{
+	/*
+    NRF_GPIO->OUTSET = (1 << 5) | (1 << 8);
+    NRF_GPIO->OUTSET = (1 << 7);
+
+    NRF_GPIO->DIRSET = (1 << 5) | (1 << 8);
+    NRF_GPIO->DIRSET = (1 << 7);
+	*/
+}
+
+
+/* Sets up the the lps25h device to measure temperature and pressure.
+ */
+static bool sensor_chip_measurement_setup(void)
+{
 		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
 		{
 				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
@@ -421,11 +434,15 @@ static void sensor_chip_powerup(void)
 				set_normal_mode();
 			
 				(void)drv_mcp9808_close();
+			
+				return ( true );
 		}
 		else
 		{
 				(void)drv_mcp9808_close();
 		}
+    
+    return ( false );
 }
 
 
@@ -433,7 +450,7 @@ static void sensor_chip_powerup(void)
  */
 static void sensor_chip_measurement_done(void)
 {
-		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+    if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
 		{
 				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
 			
@@ -469,146 +486,84 @@ static void send_one_packet(uint8_t channel_index)
 }
 
 
-void get_battery_level(uint8_t* bat_level)
+/* Powers down the the lps25h device and TWI pull-up resistors.
+ */
+static void sensor_chip_powerdown(void)
 {
-		*bat_level = g_batteryVoltage_mv / 100 * 2;
+	/*
+    NRF_GPIO->DIRCLR = (1 << 5) | (1 << 7) | (1 << 8);
+	*/
 }
 
 
 /* Handles sensor managing.
  */
-static void sensor_handler(void)
-{
-    int32_t temperature = 0;	
-		uint32_t pressure = 1000;
-		uint16_t humidity = 80;
-		uint8_t battery_level = 28;
+static void sensor_handler(uint32_t start_time_us, uint32_t retry_interval_us, uint8_t retry_count)
+{	
+		int32_t temperature = ERR_VAL;	
+		int32_t pressure = ERR_VAL;
+		int16_t humidity = ERR_VAL;
 
-		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
-		{
-				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
-				int32_t temp2 = 0;
-				drv_mcp9808_temperature_get(&temp2);
-			
-				temperature = temp2;
-			
-				(void)drv_mcp9808_close();
-		}
-		else
-		{
-				(void)drv_mcp9808_close();
-		}
-		
-		if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
-		{
-				drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
-		
-				float real_temp = sensor_read_temperature();
-//				temperature = real_temp * 1000;
-			
-				float real_hum = sensor_read_humidity();
-				humidity = real_hum;
-			
-				float real_press = sensor_read_pressure();
-				if(real_press > 800)
-					pressure = real_press;
-			
-				(void)drv_bme280_close();
-		}
-		else
-		{
-				(void)drv_bme280_close();
-		}
-		
-
-		get_battery_level(&battery_level);
-				
-		m_beacon_pdu_sensor_data_set(&(m_adv_pdu[0]), &temperature, &pressure, &humidity, &battery_level);   
-}
-
-void saadc_callback(nrf_drv_saadc_evt_t const * p_event)
-{
-    ret_code_t err_code;
-    if (p_event->type == NRF_DRV_SAADC_EVT_DONE)                                                        //Capture offset calibration complete event
+    if ( sensor_chip_measurement_setup() )
     {
-	
-        if((m_adc_evt_counter % SAADC_CALIBRATION_INTERVAL) == 0)                                  //Evaluate if offset calibration should be performed. Configure the SAADC_CALIBRATION_INTERVAL constant to change the calibration frequency
+				for ( int i = 0; i < retry_count; i++ )
         {
-            nrf_drv_saadc_abort();                                                                      // Abort all ongoing conversions. Calibration cannot be run if SAADC is busy
-            m_saadc_calibrate = true;                                                                   // Set flag to trigger calibration in main context when SAADC is stopped
-        }  
-        
-        if(m_saadc_calibrate == false)
-        {
-						float measured_voltage = (float)(p_event->data.done.p_buffer[0]) * 0.6 * 6.0 / 16384.0; 
+            m_rtc_isr_called = false;
+            hal_timer_timeout_set(start_time_us + (i * retry_interval_us));
+            wait_for_timer();
+						if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
+						{
+								drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
+								int32_t temp2 = 0;
+								if(drv_mcp9808_temperature_get(&temp2) == DRV_MCP9808_STATUS_CODE_SUCCESS)
+									temperature = temp2;
+							
+								(void)drv_mcp9808_close();
+						}
+						else
+						{
+								(void)drv_mcp9808_close();
+						}
+						
+						if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
+						{
+								drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
+						
+								float real_temp = sensor_read_temperature();
+				//				temperature = real_temp * 1000;
+							
+								float real_hum = sensor_read_humidity();
+								humidity = real_hum;
+							
+								float real_press = sensor_read_pressure();
+								pressure = real_press;
+							
+								(void)drv_bme280_close();
+						}
+						else
+						{
+								(void)drv_bme280_close();
+						}
+						
+						if(temperature != ERR_VAL && humidity != ERR_VAL && pressure != ERR_VAL)
+							break;
+				}
 				
-						g_batteryVoltage_mv = measured_voltage * 1000; //ADC_RESULT_IN_MILLI_VOLTS(p_event->data.done.p_buffer[0]);
-					
-            err_code = nrf_drv_saadc_buffer_convert(p_event->data.done.p_buffer, SAADC_SAMPLES_IN_BUFFER);             //Set buffer so the SAADC can write to it again. 						
+				if(temperature != ERR_VAL && humidity != ERR_VAL && pressure != ERR_VAL)
+				{
+					if ( M_BEACON_PDU_TYPE == M_BEACON_PDU_TYPE_TEMP_ONLY ) 
+					{							
+							m_beacon_pdu_sensor_data_set(&(m_adv_pdu[0]), &temperature, NULL, NULL);
+					}
+					else if ( M_BEACON_PDU_TYPE == M_BEACON_PDU_TYPE_TEMP_PRES ) 
+					{
+							m_beacon_pdu_sensor_data_set(&(m_adv_pdu[0]), &temperature, &pressure, &humidity);
+					}
         }
-        
-        m_adc_evt_counter++;
-  
+
+        sensor_chip_measurement_done();
     }
-    else if (p_event->type == NRF_DRV_SAADC_EVT_CALIBRATEDONE)
-    {
-     
-        err_code = nrf_drv_saadc_buffer_convert(m_buffer_pool[0], SAADC_SAMPLES_IN_BUFFER);             //Set buffer so the SAADC can write to it again. 
- 
-        err_code = nrf_drv_saadc_buffer_convert(m_buffer_pool[1], SAADC_SAMPLES_IN_BUFFER);             //Need to setup both buffers, as they were both removed with the call to nrf_drv_saadc_abort before calibration.
-        
-    }
-}
-
-void calibration_handler(void)
-{
-	if(m_saadc_calibrate == true)
-	{
-			while(nrf_drv_saadc_calibrate_offset() != NRF_SUCCESS); //Trigger calibration task
-			m_saadc_calibrate = false;
-	}
-}
-
-void saadc_init(void)
-{
-    ret_code_t err_code;
-    nrf_drv_saadc_config_t saadc_config;
-    nrf_saadc_channel_config_t channel_config;
-
-
-	
-    //Configure SAADC
-    saadc_config.low_power_mode = true;                                                   //Enable low power mode.
-    saadc_config.resolution = NRF_SAADC_RESOLUTION_14BIT;                                 //Set SAADC resolution to 12-bit. This will make the SAADC output values from 0 (when input voltage is 0V) to 2^14=16384 (when input voltage is 3.6V for channel gain setting of 1/6).
-    saadc_config.oversample = SAADC_OVERSAMPLE;                                           //Set oversample to 4x. This will make the SAADC output a single averaged value when the SAMPLE task is triggered 4 times.
-    saadc_config.interrupt_priority = APP_IRQ_PRIORITY_LOW;                               //Set SAADC interrupt to low priority.
-	
-    //Initialize SAADC
-    err_code = nrf_drv_saadc_init(&saadc_config, saadc_callback);                         //Initialize the SAADC with configuration and callback function. The application must then implement the saadc_callback function, which will be called when SAADC interrupt is triggered
-    
-    //Configure SAADC channel
-    channel_config.reference = NRF_SAADC_REFERENCE_INTERNAL;                              //Set internal reference of fixed 0.6 volts
-    channel_config.gain = NRF_SAADC_GAIN1_6;                                              //Set input gain to 1/6. The maximum SAADC input voltage is then 0.6V/(1/6)=3.6V. The single ended input range is then 0V-3.6V
-    channel_config.acq_time = NRF_SAADC_ACQTIME_40US;                                     //Set acquisition time. Set low acquisition time to enable maximum sampling frequency of 200kHz. Set high acquisition time to allow maximum source resistance up to 800 kohm, see the SAADC electrical specification in the PS. 
-    channel_config.mode = NRF_SAADC_MODE_SINGLE_ENDED;                                    //Set SAADC as single ended. This means it will only have the positive pin as input, and the negative pin is shorted to ground (0V) internally.
-    channel_config.pin_p = NRF_SAADC_INPUT_AIN0;                                          //Select the input pin for the channel. AIN0 pin maps to physical pin P0.02.
-    channel_config.pin_n = NRF_SAADC_INPUT_DISABLED;                                      //Since the SAADC is single ended, the negative pin is disabled. The negative pin is shorted to ground internally.
-    channel_config.resistor_p = NRF_SAADC_RESISTOR_DISABLED;                              //Disable pullup resistor on the input pin
-    channel_config.resistor_n = NRF_SAADC_RESISTOR_DISABLED;                              //Disable pulldown resistor on the input pin
-
-	
-    //Initialize SAADC channel
-    err_code = nrf_drv_saadc_channel_init(0, &channel_config);                            //Initialize SAADC channel 0 with the channel configuration
-    
-    if(SAADC_BURST_MODE)
-    {
-        NRF_SAADC->CH[0].CONFIG |= 0x01000000;                                            //Configure burst mode for channel 0. Burst is useful together with oversampling. When triggering the SAMPLE task in burst mode, the SAADC will sample "Oversample" number of times as fast as it can and then output a single averaged value to the RAM buffer. If burst mode is not enabled, the SAMPLE task needs to be triggered "Oversample" number of times to output a single averaged value to the RAM buffer.		
-    }
-
-    err_code = nrf_drv_saadc_buffer_convert(m_buffer_pool[0],SAADC_SAMPLES_IN_BUFFER);    //Set SAADC buffer 1. The SAADC will start to write to this buffer
-    
-    err_code = nrf_drv_saadc_buffer_convert(m_buffer_pool[1],SAADC_SAMPLES_IN_BUFFER);    //Set SAADC buffer 2. The SAADC will write to this buffer when buffer 1 is full. This will give the applicaiton time to process data in buffer 1.
-    
+    sensor_chip_powerdown();
 }
 
 
@@ -618,39 +573,31 @@ static void beacon_handler(void)
 {
     hal_radio_reset();
     hal_timer_start();
-		sensors_init();
     
     m_time_us = INITIAL_TIMEOUT - HFCLK_STARTUP_TIME_US; 
 	
-		m_time_us += POWERUP_DELAY_US;	
+		sensors_init();
 
     do
     {
         if ( m_skip_read_counter == 0 )
-        {		
-						sensor_chip_powerup();
-					
-						m_time_us += POWERUP_DELAY_US;
-					
-						m_rtc_isr_called = false;
-            hal_timer_timeout_set(m_time_us);
+        {
+            m_rtc_isr_called = false;
+            hal_timer_timeout_set(m_time_us - START_OF_INTERVAL_TO_SENSOR_READ_TIME_US);
             wait_for_timer();
-					
-            sensor_handler();
-						
-						sensor_chip_measurement_done();
-					
-						m_time_us += SAADC_DELAY_US;
-					
-						m_rtc_isr_called = false;
-            hal_timer_timeout_set(m_time_us);
+            sensor_chip_powerup();
+        
+            m_rtc_isr_called = false;
+            hal_timer_timeout_set(m_time_us - START_OF_INTERVAL_TO_SENSOR_READ_TIME_US + 10000);
             wait_for_timer();
-					
-						nrf_drv_saadc_sample();                                        //Trigger the SAADC SAMPLE task
-						calibration_handler();
+            
+            sensor_handler(m_time_us - START_OF_INTERVAL_TO_SENSOR_READ_TIME_US + 400000, 10000, 10);
         }
         m_skip_read_counter = ( (m_skip_read_counter + 1) < SENSOR_SKIP_READ_COUNT ) ? (m_skip_read_counter + 1) : 0;
-				
+        
+        m_rtc_isr_called = false;
+        hal_timer_timeout_set(m_time_us);
+        wait_for_timer();
         hal_clock_hfclk_enable();
         DBG_HFCLK_ENABLED;
         
@@ -658,7 +605,6 @@ static void beacon_handler(void)
         m_time_us += HFCLK_STARTUP_TIME_US; 
         hal_timer_timeout_set(m_time_us);
         wait_for_timer();
-				
         send_one_packet(37);
         DBG_PKT_SENT;
         send_one_packet(38);
@@ -670,7 +616,7 @@ static void beacon_handler(void)
         
         DBG_HFCLK_DISABLED;
         
-        m_time_us = m_time_us + (INTERVAL_US - HFCLK_STARTUP_TIME_US) - (POWERUP_DELAY_US + SAADC_DELAY_US); 
+        m_time_us = m_time_us + (INTERVAL_US - HFCLK_STARTUP_TIME_US); 
     } while ( 1 );
 }  
 
@@ -687,24 +633,16 @@ int main(void)
     NRF_GPIO->OUTSET = (1 << DBG_WFE_BEGIN_PIN);
     NRF_GPIO->DIRSET = (1 << DBG_WFE_BEGIN_PIN);
 #endif
-	
-		NRF_GPIO->OUTSET = (1 << 27) | (1 << 26);
-		NRF_GPIO->DIRSET = (1 << 27) | (1 << 26);
-	
-		NRF_GPIO->PIN_CNF[27] |=  GPIO_PIN_CNF_PULL_Pullup << GPIO_PIN_CNF_PULL_Pos;
-		NRF_GPIO->PIN_CNF[26] |=  GPIO_PIN_CNF_PULL_Pullup << GPIO_PIN_CNF_PULL_Pos;
     
     hal_serial_init(&serial_cfg);
     hal_twi_init();
     
-    drv_bme280_init();
-		drv_mcp9808_init();
-	
-		saadc_init();                                    //Initialize and start SAADC
-		
+    drv_mcp9808_init();
+		drv_bme280_init();
+    
     m_beacon_pdu_init(&(m_adv_pdu[0]));
     m_beacon_pdu_bd_addr_default_set(&(m_adv_pdu[0]));
-    m_beacon_pdu_sensor_data_reset(&(m_adv_pdu[0]));
+    m_beacon_pdu_sensor_data_reset(&(m_adv_pdu[0]), M_BEACON_PDU_TYPE);
     
 #ifdef DBG_RADIO_ACTIVE_ENABLE
     NRF_GPIOTE->CONFIG[0] = (GPIOTE_CONFIG_POLARITY_Toggle << GPIOTE_CONFIG_POLARITY_Pos) 
