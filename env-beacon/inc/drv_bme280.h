@@ -177,6 +177,7 @@ void sensor_set_sampling(sensor_mode mode,
 			 sensor_filter filter,
 			 standby_duration duration);
 
+void take_forced_measurement(void);
 float sensor_read_temperature(void);
 float sensor_read_pressure(void);
 float sensor_read_humidity(void);

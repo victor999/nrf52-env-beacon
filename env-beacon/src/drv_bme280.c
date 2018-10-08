@@ -445,7 +445,7 @@ void sensor_reset(void)
     @brief  Take a new measurement (only possible in forced mode)
 */
 /**************************************************************************/
-void take_forced_measurement()
+void take_forced_measurement(void)
 {   
     // If we are in forced mode, the BME sensor goes back to sleep after each
     // measurement and we need to set it to forced mode once at this point, so
