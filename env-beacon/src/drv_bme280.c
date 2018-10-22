@@ -4,6 +4,8 @@
 
 int32_t   t_fine = 0;
 
+uint8_t read_buf[10];
+
 /*=========================================================================
 CALIBRATION DATA
 -----------------------------------------------------------------------*/
@@ -465,6 +467,117 @@ void take_forced_measurement(void)
     }
 }
 
+uint32_t compensate_pressure(int32_t adc_P)
+{
+	int64_t var1, var2, p;
+	adc_P >>= 4;
+	if (adc_P == 0x800000) // value in case pressure measurement was disabled
+        return 0;
+	var1 = ((int64_t)t_fine) - 128000;
+	var2 = var1 * var1 * (int64_t)bme280_calib.dig_P6;
+	var2 = var2 + ((var1*(int64_t)bme280_calib.dig_P5)<<17);
+	var2 = var2 + (((int64_t)bme280_calib.dig_P4)<<35);
+	var1 = ((var1 * var1 * (int64_t)bme280_calib.dig_P3)>>8) + ((var1 * (int64_t)bme280_calib.dig_P2)<<12);
+	var1 = (((((int64_t)1)<<47)+var1))*((int64_t)bme280_calib.dig_P1)>>33;
+	if (var1 == 0)
+	{
+		return 0; // avoid exception caused by division by zero
+	}
+	p = 1048576-adc_P;
+	p = (((p<<31)-var2)*3125)/var1;
+	var1 = (((int64_t)bme280_calib.dig_P9) * (p>>13) * (p>>13)) >> 25;
+	var2 = (((int64_t)bme280_calib.dig_P8) * p) >> 19;
+	p = ((p + var1 + var2) >> 8) + (((int64_t)bme280_calib.dig_P7)<<4);
+	return (uint32_t)p;
+}
+
+int32_t compensate_temp(int32_t adc_T)
+{
+	int32_t var1, var2, T;
+	adc_T >>= 4;
+	if (adc_T == 0x800000) // value in case temp measurement was disabled
+        return 0;
+	var1 = ((((adc_T>>3) - ((int32_t)bme280_calib.dig_T1<<1))) * ((int32_t)bme280_calib.dig_T2)) >> 11;
+	var2 = (((((adc_T>>4) - ((int32_t)bme280_calib.dig_T1)) * ((adc_T>>4) - ((int32_t)bme280_calib.dig_T1))) >> 12) *
+	((int32_t)bme280_calib.dig_T3)) >> 14;
+	t_fine = var1 + var2;
+	T = (t_fine * 5 + 128) >> 8;
+	return T;
+}
+
+uint32_t compensate_humidity(int32_t adc_H)
+{
+	int32_t v_x1_u32r;
+	if (adc_H == 0x8000) // value in case humidity measurement was disabled
+        return 0;
+	v_x1_u32r = (t_fine - ((int32_t)76800));
+	v_x1_u32r = (((((adc_H << 14) - (((int32_t)bme280_calib.dig_H4) << 20) - (((int32_t)bme280_calib.dig_H5) * v_x1_u32r)) +
+	((int32_t)16384)) >> 15) * (((((((v_x1_u32r * ((int32_t)bme280_calib.dig_H6)) >> 10) * (((v_x1_u32r * 
+	((int32_t)bme280_calib.dig_H3)) >> 11) + ((int32_t)32768))) >> 10) + ((int32_t)2097152)) *
+	((int32_t)bme280_calib.dig_H2) + 8192) >> 14));
+	v_x1_u32r = (v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) * ((int32_t)bme280_calib.dig_H1)) >> 4));
+	v_x1_u32r = (v_x1_u32r < 0 ? 0 : v_x1_u32r);
+	v_x1_u32r = (v_x1_u32r > 419430400 ? 419430400 : v_x1_u32r);
+	return (uint32_t)(v_x1_u32r>>12);
+}
+
+void sensor_read_env(float* temp_p_a, float* press_p_a, float* hum_p_a)
+{
+	//burst read
+	
+	uint8_t reg_addr = BME280_REGISTER_PRESSUREDATA;
+
+	if ( m_drv_bme280.p_drv_bme280_cfg != NULL )
+	{
+		hal_twi_id_t twi_id = m_drv_bme280.p_drv_bme280_cfg->twi_id;
+
+		hal_twi_stop_mode_set(twi_id, HAL_TWI_STOP_MODE_STOP_ON_RX_BUF_END);
+
+		m_drv_bme280.twi_sig_callback_called = false;
+		if ( hal_twi_write(twi_id, 1, &reg_addr)== HAL_TWI_STATUS_CODE_SUCCESS )
+		{
+			while ( (m_drv_bme280.current_access_mode == DRV_BME280_ACCESS_MODE_CPU_INACTIVE)
+			&&      (!m_drv_bme280.twi_sig_callback_called) )
+			{
+					m_drv_bme280.p_drv_bme280_cfg->p_sleep_hook();
+			}
+
+			m_drv_bme280.twi_sig_callback_called = false;
+			if ( hal_twi_read(twi_id, 8, read_buf) == HAL_TWI_STATUS_CODE_SUCCESS )
+			{
+					while ( (m_drv_bme280.current_access_mode == DRV_BME280_ACCESS_MODE_CPU_INACTIVE)
+					&&      (!m_drv_bme280.twi_sig_callback_called) )
+					{
+							m_drv_bme280.p_drv_bme280_cfg->p_sleep_hook();
+					}
+					
+					uint32_t pressure = read_buf[2];
+					pressure |= ((uint16_t)read_buf[1] << 8);
+					pressure |= ((uint32_t)read_buf[0] << 16);
+					//pressure &= 0xfffff;
+					
+					uint32_t temperature = read_buf[5];
+					temperature |= ((uint16_t)read_buf[4] << 8);
+					temperature |= ((uint32_t)read_buf[3] << 16);
+					//temperature &= 0xfffff;
+					
+					uint16_t humidity = read_buf[7];
+					humidity |= ((uint16_t)read_buf[6] << 8);
+					
+					int32_t temp = compensate_temp(temperature);
+					uint32_t press = compensate_pressure(pressure);
+					uint32_t hum = compensate_humidity(humidity);
+					
+					*temp_p_a = (float)temp / 100;
+					
+					*press_p_a = (float)press / 256;
+					
+					*hum_p_a = (float)hum / 1024;
+					
+			}
+		}
+	}
+}
 
 /**************************************************************************/
 /*!
@@ -496,10 +609,11 @@ float sensor_read_temperature(void)
 
 /**************************************************************************/
 /*!
-    @brief  Returns the temperature from the sensor
+    @brief  Returns the pressure from the sensor
 */
 /**************************************************************************/
-float sensor_read_pressure(void) {
+float sensor_read_pressure(void) 
+{
     int64_t var1, var2, p;
 
     sensor_read_temperature(); // must be done first to get t_fine
