@@ -140,7 +140,7 @@ static const hal_serial_cfg_t serial_cfg =
 
 
 #define HFCLK_STARTUP_TIME_US                       (1600)              /* The time in microseconds it takes to start up the HF clock*. */
-#define INTERVAL_US                                 (8000000)           /* The time in microseconds between advertising events. */
+#define INTERVAL_US                                 (4000000)           /* The time in microseconds between advertising events. */
 #define INITIAL_TIMEOUT                             (INTERVAL_US)       /* The time in microseconds until adverising the first time. */
 #define START_OF_INTERVAL_TO_SENSOR_READ_TIME_US    (INTERVAL_US / 2)   /* The time from the start of the latest advertising event until reading the sensor. */
 #define SENSOR_SKIP_READ_COUNT                      (10)                /* The number of advertising events between reading the sensor. */
