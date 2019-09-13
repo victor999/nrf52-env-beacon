@@ -389,12 +389,12 @@ void sensors_init(void)
     
 						read_coefficients(); // read trimming parameters, see DS 4.2.2
 
-						sensor_set_sampling(MODE_NORMAL,
-							SAMPLING_X1,
-							SAMPLING_X1,
-							SAMPLING_X1,
+						sensor_set_sampling(MODE_FORCED,
+							SAMPLING_X16,
+							SAMPLING_X16,
+							SAMPLING_X16,
 							FILTER_OFF,
-							STANDBY_MS_1000); // use defaults
+							STANDBY_MS_0_5); // use defaults
 					
 						(void)drv_bme280_close();
 				}
@@ -427,6 +427,8 @@ static void sensor_chip_powerup(void)
  */
 static bool sensor_chip_measurement_setup(void)
 {
+		bool res = false;
+	
 		if ( drv_mcp9808_open(&m_drv_mcp9808_cfg) == DRV_MCP9808_STATUS_CODE_SUCCESS )
 		{
 				drv_mcp9808_access_mode_set(DRV_MCP9808_ACCESS_MODE_CPU_INACTIVE);
@@ -435,14 +437,27 @@ static bool sensor_chip_measurement_setup(void)
 			
 				(void)drv_mcp9808_close();
 			
-				return ( true );
+				if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
+				{
+					drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
+					
+					take_forced_measurement();
+					
+					(void)drv_bme280_close();
+					
+					res = true;
+				}
+				else
+				{
+						(void)drv_bme280_close();
+				}
 		}
 		else
 		{
 				(void)drv_mcp9808_close();
 		}
     
-    return ( false );
+    return ( res );
 }
 
 
@@ -528,7 +543,17 @@ static void sensor_handler(uint32_t start_time_us, uint32_t retry_interval_us, u
 						if ( drv_bme280_open(&m_drv_bme280_cfg) == DRV_BME280_STATUS_CODE_SUCCESS )
 						{
 								drv_bme280_access_mode_set(DRV_BME280_ACCESS_MODE_CPU_INACTIVE);
+							
+								float real_temp = 0.0f;
+								float real_hum = 0.0f;
+								float real_press = 0.0f;
+							
+								sensor_read_env(&real_temp, &real_press, &real_hum);
+							
+								humidity = real_hum;
+								pressure = real_press;
 						
+								/*
 								float real_temp = sensor_read_temperature();
 				//				temperature = real_temp * 1000;
 							
@@ -537,6 +562,7 @@ static void sensor_handler(uint32_t start_time_us, uint32_t retry_interval_us, u
 							
 								float real_press = sensor_read_pressure();
 								pressure = real_press;
+								*/
 							
 								(void)drv_bme280_close();
 						}
